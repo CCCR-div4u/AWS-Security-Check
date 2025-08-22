@@ -1,0 +1,27 @@
+[Unit]
+Description=AWS Security Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/aws-security-dashboard
+Environment=PATH=/opt/aws-security-dashboard/venv/bin
+ExecStart=/opt/aws-security-dashboard/venv/bin/streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+Restart=always
+RestartSec=10
+
+# 로그 설정
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aws-security-dashboard
+
+# 보안 설정
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/aws-security-dashboard
+
+[Install]
+WantedBy=multi-user.target
