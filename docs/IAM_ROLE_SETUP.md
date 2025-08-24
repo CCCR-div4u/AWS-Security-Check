@@ -47,7 +47,9 @@ AWS 콘솔 → IAM → 정책 → 정책 생성
         "wafv2:ListWebACLs",
         "wafv2:GetWebACL",
         "waf:ListWebACLs",
-        "waf:GetWebACL"
+        "waf:GetWebACL",
+        "bedrock:InvokeModel",
+        "bedrock:ListFoundationModels"
       ],
       "Resource": "*"
     }

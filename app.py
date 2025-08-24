@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
 from botocore.exceptions import ClientError, NoCredentialsError
+import json
+import logging
 
 # Streamlit 페이지 설정
 st.set_page_config(
@@ -1350,108 +1352,565 @@ def get_aws_documentation_links():
         }
     }
 
-def get_amazon_q_recommendations(issue, context=None):
-    """Amazon Q 기반 맞춤형 권장 사항 생성 (선택사항)"""
-    
+def initialize_bedrock_client(aws_session):
+    """Amazon Bedrock 클라이언트 초기화"""
     try:
-        # Amazon Q API 연동 시도 (실제 구현에서는 boto3 사용)
-        # 현재는 시뮬레이션으로 구현
+        bedrock_client = aws_session.client('bedrock-runtime', region_name='us-east-1')
+        # Bedrock 서비스 사용 가능 여부 테스트
+        return bedrock_client
+    except Exception as e:
+        logging.warning(f"Bedrock 클라이언트 초기화 실패: {str(e)}")
+        return None
+
+def generate_ai_security_prompt(issue, context=None):
+    """보안 이슈를 AI 프롬프트로 변환"""
+    
+    issue_type = issue.get('type', '')
+    service = issue.get('service', '')
+    resource = issue.get('resource', '')
+    severity = issue.get('severity', 'MEDIUM')
+    description = issue.get('description', '')
+    
+    # 기본 프롬프트 구성
+    prompt = f"""
+당신은 AWS 보안 전문가입니다. 다음 보안 이슈에 대한 맞춤형 해결 방안을 제공해주세요.
+
+**보안 이슈 정보:**
+- 서비스: {service}
+- 이슈 유형: {issue_type}
+- 리소스: {resource}
+- 심각도: {severity}
+- 설명: {description}
+
+**요청사항:**
+1. 이 보안 이슈의 위험성과 잠재적 영향을 분석해주세요
+2. 단계별 해결 방안을 제시해주세요
+3. 예방을 위한 모범 사례를 추천해주세요
+4. 관련된 AWS 서비스나 도구를 제안해주세요
+
+**응답 형식:**
+JSON 형태로 다음 구조를 따라 응답해주세요:
+{{
+    "risk_analysis": "위험성 분석",
+    "impact_assessment": "잠재적 영향 평가",
+    "remediation_steps": ["단계1", "단계2", "단계3"],
+    "best_practices": ["모범사례1", "모범사례2"],
+    "related_services": ["서비스1", "서비스2"],
+    "priority_level": "HIGH/MEDIUM/LOW",
+    "estimated_effort": "해결에 필요한 예상 시간"
+}}
+"""
+    
+    # 컨텍스트 정보 추가
+    if context:
+        account_info = context.get('account_info', {})
+        scan_results = context.get('scan_results', {})
         
-        issue_type = issue.get('type', '')
-        service = issue.get('service', '')
-        resource = issue.get('resource', '')
+        prompt += f"""
+
+**추가 컨텍스트:**
+- AWS 계정 ID: {account_info.get('account_id', 'N/A')}
+- 리전: {account_info.get('region', 'N/A')}
+- 전체 발견된 이슈 수: {sum(len(result.get('issues', [])) for result in scan_results.values() if isinstance(result, dict))}
+
+이 컨텍스트를 고려하여 더욱 맞춤형 권장사항을 제공해주세요.
+"""
+    
+    return prompt
+
+def invoke_bedrock_model(bedrock_client, prompt):
+    """Bedrock Claude 3 모델 호출"""
+    try:
+        # Claude 3 Sonnet 모델 사용
+        model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
         
-        # Amazon Q 스타일의 맞춤형 권장사항 생성
-        q_recommendations = {
-            'mfa_not_enabled': {
-                'ai_analysis': f"사용자 {resource}에 대한 MFA 미설정은 계정 탈취의 주요 위험 요소입니다.",
-                'contextual_advice': "현재 환경에서는 가상 MFA 디바이스 사용을 권장합니다.",
-                'automation_suggestion': "AWS CLI를 사용한 일괄 MFA 설정 스크립트를 제공할 수 있습니다.",
-                'related_services': ["AWS IAM Identity Center", "AWS Organizations SCPs"],
-                'compliance_impact': "SOC 2, ISO 27001 규정 준수에 필수적입니다."
-            },
-            'public_bucket_policy': {
-                'ai_analysis': f"S3 버킷 {resource}의 공개 정책은 데이터 유출의 직접적인 위험을 초래합니다.",
-                'contextual_advice': "CloudFront를 통한 제한적 공개 액세스를 고려해보세요.",
-                'automation_suggestion': "S3 버킷 정책 자동 검증 Lambda 함수 설정을 권장합니다.",
-                'related_services': ["AWS Config", "AWS CloudTrail", "AWS Macie"],
-                'compliance_impact': "GDPR, CCPA 등 데이터 보호 규정 위반 가능성이 있습니다."
-            },
-            'no_cloudtrail': {
-                'ai_analysis': "CloudTrail 미설정은 보안 사고 발생 시 원인 분석을 불가능하게 만듭니다.",
-                'contextual_advice': "멀티 리전 트레일 설정으로 전체 AWS 환경을 모니터링하세요.",
-                'automation_suggestion': "CloudFormation 템플릿을 사용한 표준화된 CloudTrail 설정을 제공합니다.",
-                'related_services': ["AWS CloudWatch", "AWS EventBridge", "AWS Security Hub"],
-                'compliance_impact': "PCI DSS, HIPAA 등 규정에서 요구하는 감사 로그 요구사항을 충족하지 못합니다."
-            }
+        # 요청 본문 구성
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 2000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.3,
+            "top_p": 0.9
         }
         
-        base_recommendation = q_recommendations.get(issue_type, {
-            'ai_analysis': f"{service} 서비스의 {issue_type} 이슈는 보안 위험을 증가시킵니다.",
-            'contextual_advice': "AWS 보안 모범 사례를 따라 해결하세요.",
-            'automation_suggestion': "AWS Config 규칙을 사용한 자동 모니터링을 고려하세요.",
-            'related_services': ["AWS Security Hub", "AWS Config"],
-            'compliance_impact': "조직의 보안 정책 및 규정 준수 요구사항을 검토하세요."
-        })
+        # Bedrock 모델 호출
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(request_body),
+            contentType="application/json",
+            accept="application/json"
+        )
         
-        # 컨텍스트 기반 추가 권장사항
-        if context:
-            account_info = context.get('account_info', {})
-            scan_results = context.get('scan_results', {})
+        # 응답 파싱
+        response_body = json.loads(response['body'].read())
+        ai_response = response_body.get('content', [{}])[0].get('text', '')
+        
+        return ai_response
+        
+    except Exception as e:
+        logging.error(f"Bedrock 모델 호출 실패: {str(e)}")
+        return None
+
+def parse_ai_response(ai_response):
+    """AI 응답을 구조화된 데이터로 파싱"""
+    try:
+        # JSON 응답 파싱 시도
+        if ai_response and '{' in ai_response and '}' in ai_response:
+            # JSON 부분만 추출
+            start_idx = ai_response.find('{')
+            end_idx = ai_response.rfind('}') + 1
+            json_str = ai_response[start_idx:end_idx]
             
-            # 계정 크기에 따른 권장사항 조정
-            total_issues = sum(len(result.get('issues', [])) for result in scan_results.values() 
-                             if isinstance(result, dict) and 'issues' in result)
-            
-            if total_issues > 20:
-                base_recommendation['scale_advice'] = "대규모 환경으로 보이므로 AWS Organizations와 AWS Control Tower 사용을 권장합니다."
-            
-            # 리전 기반 권장사항
-            region = account_info.get('region', '')
-            if region == 'ap-northeast-2':
-                base_recommendation['regional_advice'] = "한국 리전 사용자를 위한 한국어 AWS 지원 및 문서를 활용하세요."
+            parsed_response = json.loads(json_str)
+            return parsed_response
+        else:
+            # JSON 형태가 아닌 경우 기본 구조로 변환
+            return {
+                "risk_analysis": ai_response[:200] if ai_response else "AI 분석을 사용할 수 없습니다.",
+                "impact_assessment": "상세한 영향 평가가 필요합니다.",
+                "remediation_steps": ["AI 권장사항을 확인하세요.", "AWS 문서를 참조하세요."],
+                "best_practices": ["AWS 보안 모범 사례를 따르세요."],
+                "related_services": ["AWS Security Hub", "AWS Config"],
+                "priority_level": "MEDIUM",
+                "estimated_effort": "1-2시간"
+            }
+    except json.JSONDecodeError:
+        # JSON 파싱 실패 시 기본 응답 반환
+        return {
+            "risk_analysis": "AI 응답 파싱에 실패했습니다.",
+            "impact_assessment": "수동으로 위험성을 평가해주세요.",
+            "remediation_steps": ["AWS 콘솔에서 해당 리소스를 확인하세요.", "AWS 문서를 참조하여 해결하세요."],
+            "best_practices": ["정기적인 보안 검토를 수행하세요."],
+            "related_services": ["AWS Security Hub"],
+            "priority_level": "MEDIUM",
+            "estimated_effort": "미정"
+        }
+
+def get_amazon_q_recommendations(issue, context=None):
+    """Amazon Bedrock 기반 맞춤형 권장 사항 생성"""
+    
+    try:
+        # AWS 세션 가져오기
+        aws_session = st.session_state.get('aws_session')
+        if not aws_session:
+            return {
+                'available': False,
+                'error': 'AWS 세션이 없습니다.',
+                'fallback_message': "AWS 연결 후 AI 권장사항을 사용할 수 있습니다."
+            }
+        
+        # Bedrock 클라이언트 초기화
+        bedrock_client = initialize_bedrock_client(aws_session)
+        if not bedrock_client:
+            return get_fallback_recommendations(issue, context)
+        
+        # AI 프롬프트 생성
+        prompt = generate_ai_security_prompt(issue, context)
+        
+        # Bedrock 모델 호출
+        ai_response = invoke_bedrock_model(bedrock_client, prompt)
+        if not ai_response:
+            return get_fallback_recommendations(issue, context)
+        
+        # AI 응답 파싱
+        parsed_recommendations = parse_ai_response(ai_response)
         
         return {
             'available': True,
-            'recommendations': base_recommendation,
-            'confidence_score': 0.85,
-            'generated_at': datetime.now().isoformat()
+            'recommendations': parsed_recommendations,
+            'confidence_score': 0.9,
+            'generated_at': datetime.now().isoformat(),
+            'model_used': 'Claude 3 Sonnet',
+            'raw_response': ai_response[:500] + "..." if len(ai_response) > 500 else ai_response
         }
         
     except Exception as e:
-        # Amazon Q API 사용 불가능한 경우 기본 권장사항 반환
-        return {
-            'available': False,
-            'error': str(e),
-            'fallback_message': "Amazon Q 서비스를 사용할 수 없습니다. 기본 권장사항을 사용합니다."
+        logging.error(f"AI 권장사항 생성 실패: {str(e)}")
+        return get_fallback_recommendations(issue, context)
+
+def get_fallback_recommendations(issue, context=None):
+    """Bedrock 사용 불가능 시 기본 권장사항 반환"""
+    
+    issue_type = issue.get('type', '')
+    service = issue.get('service', '')
+    resource = issue.get('resource', '')
+    
+    # 기본 권장사항 템플릿
+    fallback_templates = {
+        'mfa_not_enabled': {
+            'risk_analysis': f"사용자 {resource}에 대한 MFA 미설정은 계정 탈취의 주요 위험 요소입니다.",
+            'impact_assessment': "무단 액세스로 인한 데이터 유출 및 리소스 오남용 가능성",
+            'remediation_steps': [
+                "AWS 콘솔에서 IAM 사용자 선택",
+                "보안 자격 증명 탭에서 MFA 디바이스 할당",
+                "가상 MFA 디바이스 설정 완료",
+                "MFA 정책 적용 확인"
+            ],
+            'best_practices': ["모든 IAM 사용자에 MFA 강제 적용", "정기적인 MFA 디바이스 교체"],
+            'related_services': ["AWS IAM Identity Center", "AWS Organizations"],
+            'priority_level': "HIGH",
+            'estimated_effort': "30분"
+        },
+        'public_bucket_policy': {
+            'risk_analysis': f"S3 버킷 {resource}의 공개 정책은 데이터 유출의 직접적인 위험을 초래합니다.",
+            'impact_assessment': "민감한 데이터의 무단 액세스 및 다운로드 가능성",
+            'remediation_steps': [
+                "S3 콘솔에서 해당 버킷 선택",
+                "권한 탭에서 버킷 정책 검토",
+                "불필요한 공개 권한 제거",
+                "버킷 공개 액세스 차단 설정 활성화"
+            ],
+            'best_practices': ["최소 권한 원칙 적용", "정기적인 버킷 정책 검토"],
+            'related_services': ["AWS Config", "AWS CloudTrail", "AWS Macie"],
+            'priority_level': "HIGH",
+            'estimated_effort': "15분"
         }
+    }
+    
+    default_template = {
+        'risk_analysis': f"{service} 서비스의 {issue_type} 이슈는 보안 위험을 증가시킵니다.",
+        'impact_assessment': "보안 취약점으로 인한 잠재적 위험 존재",
+        'remediation_steps': [
+            "AWS 콘솔에서 해당 리소스 확인",
+            "AWS 보안 모범 사례 문서 참조",
+            "적절한 보안 설정 적용",
+            "변경 사항 테스트 및 검증"
+        ],
+        'best_practices': ["정기적인 보안 검토", "AWS Config 규칙 활용"],
+        'related_services': ["AWS Security Hub", "AWS Config"],
+        'priority_level': "MEDIUM",
+        'estimated_effort': "1시간"
+    }
+    
+    recommendations = fallback_templates.get(issue_type, default_template)
+    
+    return {
+        'available': False,
+        'recommendations': recommendations,
+        'confidence_score': 0.7,
+        'generated_at': datetime.now().isoformat(),
+        'fallback_message': "AI 서비스를 사용할 수 없어 기본 권장사항을 제공합니다."
+    }
+
+def generate_comprehensive_ai_analysis(scan_results, context=None):
+    """전체 스캔 결과에 대한 포괄적 AI 분석 생성"""
+    
+    try:
+        # 모든 보안 이슈 수집
+        all_issues = []
+        for service, result in scan_results.items():
+            if isinstance(result, dict) and 'issues' in result:
+                for issue in result['issues']:
+                    issue['service'] = service
+                    all_issues.append(issue)
+        
+        # 심각도별 분류
+        high_issues = [issue for issue in all_issues if issue.get('severity') == 'HIGH']
+        medium_issues = [issue for issue in all_issues if issue.get('severity') == 'MEDIUM']
+        low_issues = [issue for issue in all_issues if issue.get('severity') == 'LOW']
+        
+        # 우선순위 이슈 선별 (최대 10개)
+        priority_issues = prioritize_security_issues(all_issues)
+        
+        # AI 분석 결과 저장
+        ai_analysis_results = {
+            'summary': generate_security_summary_with_ai(all_issues, context),
+            'priority_recommendations': [],
+            'service_specific_advice': {},
+            'compliance_guidance': generate_compliance_guidance(all_issues),
+            'automation_suggestions': generate_automation_suggestions(all_issues)
+        }
+        
+        # 우선순위 이슈에 대한 AI 권장사항 생성
+        for issue in priority_issues[:5]:  # 상위 5개만 AI 분석
+            ai_recommendation = get_amazon_q_recommendations(issue, context)
+            
+            if ai_recommendation.get('available'):
+                ai_analysis_results['priority_recommendations'].append({
+                    'issue': issue,
+                    'ai_recommendation': ai_recommendation,
+                    'priority_rank': priority_issues.index(issue) + 1
+                })
+        
+        # 서비스별 종합 조언 생성
+        for service in ['iam', 's3', 'cloudtrail', 'guardduty', 'waf']:
+            service_issues = [issue for issue in all_issues if issue.get('service') == service]
+            if service_issues:
+                ai_analysis_results['service_specific_advice'][service] = generate_service_specific_advice(service, service_issues, context)
+        
+        return ai_analysis_results
+        
+    except Exception as e:
+        logging.error(f"포괄적 AI 분석 생성 실패: {str(e)}")
+        return None
+
+def prioritize_security_issues(issues):
+    """보안 이슈 우선순위 정렬"""
+    
+    # 우선순위 점수 계산 함수
+    def calculate_priority_score(issue):
+        score = 0
+        
+        # 심각도 점수
+        severity_scores = {'HIGH': 100, 'MEDIUM': 50, 'LOW': 20}
+        score += severity_scores.get(issue.get('severity', 'LOW'), 20)
+        
+        # 서비스별 가중치
+        service_weights = {
+            'iam': 30,      # IAM은 가장 중요
+            's3': 25,       # S3 데이터 보안
+            'cloudtrail': 20, # 감사 로그
+            'guardduty': 15,  # 위협 탐지
+            'waf': 10       # 웹 보안
+        }
+        score += service_weights.get(issue.get('service', ''), 5)
+        
+        # 이슈 유형별 가중치
+        critical_types = [
+            'mfa_not_enabled', 'public_bucket_policy', 'no_cloudtrail',
+            'admin_access_key', 'unused_access_key', 'public_bucket'
+        ]
+        if issue.get('type') in critical_types:
+            score += 20
+        
+        # 리소스 수 고려 (영향 범위)
+        resource_count = len(issue.get('resources', [issue.get('resource', '')]))
+        score += min(resource_count * 2, 20)  # 최대 20점
+        
+        return score
+    
+    # 점수별 정렬
+    sorted_issues = sorted(issues, key=calculate_priority_score, reverse=True)
+    return sorted_issues
+
+def generate_security_summary_with_ai(issues, context=None):
+    """AI를 사용한 보안 상태 요약 생성"""
+    
+    try:
+        aws_session = st.session_state.get('aws_session')
+        if not aws_session:
+            return generate_basic_security_summary(issues)
+        
+        bedrock_client = initialize_bedrock_client(aws_session)
+        if not bedrock_client:
+            return generate_basic_security_summary(issues)
+        
+        # 요약 생성을 위한 프롬프트
+        summary_prompt = f"""
+AWS 보안 전문가로서 다음 보안 스캔 결과를 분석하고 경영진을 위한 요약 보고서를 작성해주세요.
+
+**스캔 결과 요약:**
+- 총 발견된 이슈: {len(issues)}개
+- 높은 위험: {len([i for i in issues if i.get('severity') == 'HIGH'])}개
+- 중간 위험: {len([i for i in issues if i.get('severity') == 'MEDIUM'])}개
+- 낮은 위험: {len([i for i in issues if i.get('severity') == 'LOW'])}개
+
+**주요 이슈 유형:**
+{', '.join(set(issue.get('type', '') for issue in issues[:10]))}
+
+**요청사항:**
+1. 전체적인 보안 상태 평가 (1-10점)
+2. 가장 시급한 3가지 보안 위험
+3. 비즈니스 영향도 분석
+4. 권장 조치 우선순위
+
+JSON 형태로 응답해주세요:
+{{
+    "overall_score": "점수 (1-10)",
+    "security_grade": "등급 (A-F)",
+    "critical_risks": ["위험1", "위험2", "위험3"],
+    "business_impact": "비즈니스 영향 설명",
+    "immediate_actions": ["조치1", "조치2", "조치3"],
+    "timeline_recommendation": "권장 해결 기간"
+}}
+"""
+        
+        ai_response = invoke_bedrock_model(bedrock_client, summary_prompt)
+        if ai_response:
+            parsed_summary = parse_ai_response(ai_response)
+            return parsed_summary
+        
+    except Exception as e:
+        logging.error(f"AI 보안 요약 생성 실패: {str(e)}")
+    
+    return generate_basic_security_summary(issues)
+
+def generate_basic_security_summary(issues):
+    """기본 보안 요약 생성 (AI 사용 불가 시)"""
+    
+    high_count = len([i for i in issues if i.get('severity') == 'HIGH'])
+    medium_count = len([i for i in issues if i.get('severity') == 'MEDIUM'])
+    low_count = len([i for i in issues if i.get('severity') == 'LOW'])
+    
+    # 기본 점수 계산
+    total_score = max(1, 10 - (high_count * 2) - (medium_count * 1) - (low_count * 0.5))
+    
+    return {
+        "overall_score": f"{total_score:.1f}",
+        "security_grade": "A" if total_score >= 9 else "B" if total_score >= 7 else "C" if total_score >= 5 else "D",
+        "critical_risks": [
+            "높은 위험 이슈 해결 필요" if high_count > 0 else "전반적인 보안 강화",
+            "정기적인 보안 검토 수행",
+            "보안 모니터링 체계 구축"
+        ],
+        "business_impact": f"총 {len(issues)}개의 보안 이슈가 발견되었으며, 즉시 조치가 필요합니다.",
+        "immediate_actions": [
+            "높은 위험 이슈 우선 해결",
+            "보안 정책 검토 및 업데이트",
+            "정기적인 보안 스캔 일정 수립"
+        ],
+        "timeline_recommendation": "1-2주 내 주요 이슈 해결"
+    }
+
+def generate_service_specific_advice(service, service_issues, context=None):
+    """서비스별 맞춤 조언 생성"""
+    
+    service_templates = {
+        'iam': {
+            'focus_areas': ['사용자 권한 관리', 'MFA 설정', '액세스 키 보안'],
+            'best_practices': ['최소 권한 원칙', '정기적인 권한 검토', 'IAM 역할 사용'],
+            'automation_tools': ['AWS IAM Access Analyzer', 'AWS Organizations SCPs']
+        },
+        's3': {
+            'focus_areas': ['버킷 정책', '암호화 설정', '공개 액세스 차단'],
+            'best_practices': ['버킷 레벨 암호화', '액세스 로깅', 'VPC 엔드포인트 사용'],
+            'automation_tools': ['AWS Config Rules', 'AWS Macie', 'S3 Bucket Notifications']
+        },
+        'cloudtrail': {
+            'focus_areas': ['로그 무결성', '멀티 리전 설정', '로그 분석'],
+            'best_practices': ['로그 파일 검증', 'CloudWatch 통합', '장기 보관 정책'],
+            'automation_tools': ['AWS CloudWatch Insights', 'AWS EventBridge']
+        }
+    }
+    
+    template = service_templates.get(service, {
+        'focus_areas': ['보안 설정 검토'],
+        'best_practices': ['AWS 보안 모범 사례 적용'],
+        'automation_tools': ['AWS Security Hub']
+    })
+    
+    return {
+        'service': service.upper(),
+        'issue_count': len(service_issues),
+        'severity_breakdown': {
+            'high': len([i for i in service_issues if i.get('severity') == 'HIGH']),
+            'medium': len([i for i in service_issues if i.get('severity') == 'MEDIUM']),
+            'low': len([i for i in service_issues if i.get('severity') == 'LOW'])
+        },
+        'focus_areas': template['focus_areas'],
+        'best_practices': template['best_practices'],
+        'automation_tools': template['automation_tools'],
+        'priority_actions': [issue.get('type', '') for issue in service_issues[:3]]
+    }
+
+def generate_compliance_guidance(issues):
+    """규정 준수 가이드 생성"""
+    
+    compliance_mapping = {
+        'mfa_not_enabled': ['SOC 2', 'ISO 27001', 'PCI DSS'],
+        'public_bucket_policy': ['GDPR', 'CCPA', 'HIPAA'],
+        'no_cloudtrail': ['PCI DSS', 'SOX', 'HIPAA'],
+        'weak_password_policy': ['ISO 27001', 'NIST'],
+        'unused_access_key': ['SOC 2', 'ISO 27001']
+    }
+    
+    affected_standards = set()
+    for issue in issues:
+        issue_type = issue.get('type', '')
+        standards = compliance_mapping.get(issue_type, [])
+        affected_standards.update(standards)
+    
+    return {
+        'affected_standards': list(affected_standards),
+        'compliance_risk_level': 'HIGH' if len(affected_standards) > 3 else 'MEDIUM' if len(affected_standards) > 1 else 'LOW',
+        'recommendations': [
+            '규정 준수 담당자와 협의',
+            '내부 감사 일정 수립',
+            '문서화 및 증거 수집'
+        ]
+    }
+
+def generate_automation_suggestions(issues):
+    """자동화 제안 생성"""
+    
+    automation_opportunities = []
+    
+    # 이슈 유형별 자동화 제안
+    issue_types = set(issue.get('type', '') for issue in issues)
+    
+    automation_mapping = {
+        'mfa_not_enabled': {
+            'tool': 'AWS Config Rule',
+            'description': 'MFA 미설정 사용자 자동 탐지',
+            'implementation': 'mfa-enabled-for-iam-console-access 규칙 활성화'
+        },
+        'public_bucket_policy': {
+            'tool': 'AWS Config + Lambda',
+            'description': 'S3 버킷 공개 설정 자동 차단',
+            'implementation': 'S3 버킷 정책 변경 시 자동 검증 및 차단'
+        },
+        'unused_access_key': {
+            'tool': 'AWS Lambda + CloudWatch',
+            'description': '미사용 액세스 키 자동 비활성화',
+            'implementation': '90일 미사용 키 자동 탐지 및 알림'
+        }
+    }
+    
+    for issue_type in issue_types:
+        if issue_type in automation_mapping:
+            automation_opportunities.append(automation_mapping[issue_type])
+    
+    return {
+        'opportunities': automation_opportunities,
+        'priority_level': 'HIGH' if len(automation_opportunities) > 3 else 'MEDIUM',
+        'estimated_effort': f"{len(automation_opportunities) * 2}-{len(automation_opportunities) * 4}시간"
+    }
 
 def enhance_recommendations_with_ai(issues, context=None):
     """AI 기반으로 권장사항 향상"""
     
+    try:
+        # 포괄적 AI 분석 수행
+        ai_analysis = generate_comprehensive_ai_analysis(
+            st.session_state.get('scan_results', {}), 
+            context
+        )
+        
+        if ai_analysis:
+            return {
+                'enhanced': True,
+                'ai_analysis': ai_analysis,
+                'priority_recommendations': ai_analysis.get('priority_recommendations', []),
+                'service_advice': ai_analysis.get('service_specific_advice', {}),
+                'compliance_guidance': ai_analysis.get('compliance_guidance', {}),
+                'automation_suggestions': ai_analysis.get('automation_suggestions', {})
+            }
+    
+    except Exception as e:
+        logging.error(f"AI 권장사항 향상 실패: {str(e)}")
+    
+    # AI 사용 불가능 시 기본 권장사항
     enhanced_recommendations = []
+    priority_issues = prioritize_security_issues(issues)
     
-    for issue in issues[:10]:  # 상위 10개 이슈만 처리
-        base_remediation = get_detailed_remediation_steps(issue.get('type'), issue.get('resource'))
-        
-        # Amazon Q 권장사항 시도
-        q_recommendation = get_amazon_q_recommendations(issue, context)
-        
-        enhanced_item = {
+    for issue in priority_issues[:5]:
+        enhanced_recommendations.append({
             'issue': issue,
-            'base_remediation': base_remediation,
-            'ai_enhanced': q_recommendation.get('available', False)
-        }
-        
-        if q_recommendation.get('available'):
-            enhanced_item['ai_recommendations'] = q_recommendation['recommendations']
-            enhanced_item['confidence_score'] = q_recommendation.get('confidence_score', 0.0)
-        else:
-            enhanced_item['ai_fallback'] = q_recommendation.get('fallback_message', '')
-        
-        enhanced_recommendations.append(enhanced_item)
+            'basic_recommendation': get_detailed_remediation_steps(issue.get('type', '')),
+            'enhanced': False,
+            'priority_rank': priority_issues.index(issue) + 1
+        })
     
-    return enhanced_recommendations
+    return {
+        'enhanced': False,
+        'priority_recommendations': enhanced_recommendations,
+        'fallback_message': 'AI 분석을 사용할 수 없어 기본 권장사항을 제공합니다.'
+    }
 
 def generate_executive_summary(scan_results, integrated_analysis):
     """경영진을 위한 요약 보고서 생성"""
@@ -3341,7 +3800,12 @@ def show_dashboard():
     
     st.markdown("---")
     
-    # 4. 대시보드 액션
+    # 4. AI 보안 어드바이저
+    show_ai_security_advisor(scan_results)
+    
+    st.markdown("---")
+    
+    # 5. 대시보드 액션
     show_dashboard_actions()
 
 def show_security_overview(summary, account_info):
@@ -4559,6 +5023,323 @@ def show_progress_with_eta(current_step, total_steps, start_time):
     else:
         st.progress(0)
         st.info("스캔을 시작하는 중...")
+
+def show_ai_security_advisor(scan_results):
+    """AI 보안 어드바이저 섹션 표시"""
+    
+    st.markdown("## 🤖 AI 보안 어드바이저")
+    
+    # AI 분석 상태 확인
+    if 'ai_analysis' not in st.session_state:
+        with st.spinner("AI 보안 분석을 수행하는 중..."):
+            try:
+                # 모든 이슈 수집
+                all_issues = []
+                for service, result in scan_results.items():
+                    if isinstance(result, dict) and 'issues' in result:
+                        for issue in result['issues']:
+                            issue['service'] = service
+                            all_issues.append(issue)
+                
+                # AI 분석 수행
+                context = {
+                    'account_info': st.session_state.get('account_info', {}),
+                    'scan_results': scan_results
+                }
+                
+                ai_enhanced = enhance_recommendations_with_ai(all_issues, context)
+                st.session_state.ai_analysis = ai_enhanced
+                
+            except Exception as e:
+                st.error(f"AI 분석 중 오류가 발생했습니다: {str(e)}")
+                return
+    
+    ai_analysis = st.session_state.get('ai_analysis', {})
+    
+    if not ai_analysis:
+        st.warning("AI 분석 결과를 사용할 수 없습니다.")
+        return
+    
+    # AI 분석 결과 표시
+    if ai_analysis.get('enhanced'):
+        show_enhanced_ai_analysis(ai_analysis)
+    else:
+        show_basic_ai_analysis(ai_analysis)
+
+def show_enhanced_ai_analysis(ai_analysis):
+    """향상된 AI 분석 결과 표시"""
+    
+    ai_data = ai_analysis.get('ai_analysis', {})
+    
+    # 1. AI 보안 요약
+    st.markdown("### 📋 AI 보안 요약")
+    summary = ai_data.get('summary', {})
+    
+    if summary:
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            score = summary.get('overall_score', 'N/A')
+            st.metric("보안 점수", f"{score}/10")
+        
+        with col2:
+            grade = summary.get('security_grade', 'N/A')
+            st.metric("보안 등급", grade)
+        
+        with col3:
+            timeline = summary.get('timeline_recommendation', 'N/A')
+            st.metric("권장 해결 기간", timeline)
+        
+        with col4:
+            st.metric("AI 신뢰도", "90%")
+        
+        # 주요 위험 요소
+        if 'critical_risks' in summary:
+            st.markdown("**🚨 주요 위험 요소:**")
+            for i, risk in enumerate(summary['critical_risks'][:3], 1):
+                st.write(f"{i}. {risk}")
+        
+        # 비즈니스 영향
+        if 'business_impact' in summary:
+            st.markdown("**💼 비즈니스 영향:**")
+            st.info(summary['business_impact'])
+    
+    st.markdown("---")
+    
+    # 2. 우선순위 AI 권장사항
+    st.markdown("### 🎯 우선순위 AI 권장사항")
+    
+    priority_recommendations = ai_analysis.get('priority_recommendations', [])
+    
+    if priority_recommendations:
+        for i, rec in enumerate(priority_recommendations[:3], 1):
+            with st.expander(f"🔥 우선순위 #{i}: {rec['issue'].get('type', 'Unknown')} ({rec['issue'].get('service', '').upper()})"):
+                show_detailed_ai_recommendation(rec)
+    else:
+        st.info("우선순위 AI 권장사항이 없습니다.")
+    
+    st.markdown("---")
+    
+    # 3. 서비스별 AI 조언
+    st.markdown("### 🛠️ 서비스별 AI 조언")
+    
+    service_advice = ai_analysis.get('service_advice', {})
+    
+    if service_advice:
+        tabs = st.tabs([service.upper() for service in service_advice.keys()])
+        
+        for tab, (service, advice) in zip(tabs, service_advice.items()):
+            with tab:
+                show_service_ai_advice(service, advice)
+    else:
+        st.info("서비스별 AI 조언이 없습니다.")
+    
+    st.markdown("---")
+    
+    # 4. 규정 준수 및 자동화 제안
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### 📜 규정 준수 가이드")
+        compliance = ai_analysis.get('compliance_guidance', {})
+        show_compliance_guidance_ui(compliance)
+    
+    with col2:
+        st.markdown("### ⚙️ 자동화 제안")
+        automation = ai_analysis.get('automation_suggestions', {})
+        show_automation_suggestions_ui(automation)
+
+def show_basic_ai_analysis(ai_analysis):
+    """기본 AI 분석 결과 표시 (AI 사용 불가 시)"""
+    
+    st.warning("⚠️ " + ai_analysis.get('fallback_message', 'AI 분석을 사용할 수 없습니다.'))
+    
+    st.markdown("### 📋 기본 권장사항")
+    
+    priority_recommendations = ai_analysis.get('priority_recommendations', [])
+    
+    if priority_recommendations:
+        for i, rec in enumerate(priority_recommendations[:5], 1):
+            with st.expander(f"우선순위 #{i}: {rec['issue'].get('type', 'Unknown')} ({rec['issue'].get('service', '').upper()})"):
+                issue = rec['issue']
+                basic_rec = rec.get('basic_recommendation', {})
+                
+                # 이슈 정보
+                st.markdown(f"**서비스:** {issue.get('service', 'N/A').upper()}")
+                st.markdown(f"**심각도:** {issue.get('severity', 'N/A')}")
+                st.markdown(f"**리소스:** {issue.get('resource', 'N/A')}")
+                
+                if issue.get('description'):
+                    st.markdown(f"**설명:** {issue['description']}")
+                
+                # 기본 해결 단계
+                if basic_rec and 'steps' in basic_rec:
+                    st.markdown("**해결 단계:**")
+                    for step_num, step in enumerate(basic_rec['steps'], 1):
+                        st.write(f"{step_num}. {step}")
+                
+                # 관련 문서
+                if basic_rec and 'documentation' in basic_rec:
+                    st.markdown("**관련 문서:**")
+                    for doc in basic_rec['documentation']:
+                        st.markdown(f"- [{doc['title']}]({doc['url']})")
+
+def show_detailed_ai_recommendation(recommendation):
+    """상세한 AI 권장사항 표시"""
+    
+    issue = recommendation['issue']
+    ai_rec = recommendation.get('ai_recommendation', {})
+    
+    if not ai_rec.get('available'):
+        st.warning("AI 권장사항을 사용할 수 없습니다.")
+        return
+    
+    rec_data = ai_rec.get('recommendations', {})
+    
+    # 이슈 기본 정보
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown(f"**서비스:** {issue.get('service', 'N/A').upper()}")
+    with col2:
+        st.markdown(f"**심각도:** {issue.get('severity', 'N/A')}")
+    with col3:
+        confidence = ai_rec.get('confidence_score', 0) * 100
+        st.markdown(f"**AI 신뢰도:** {confidence:.0f}%")
+    
+    # AI 위험 분석
+    if 'risk_analysis' in rec_data:
+        st.markdown("**🔍 AI 위험 분석:**")
+        st.write(rec_data['risk_analysis'])
+    
+    # 영향 평가
+    if 'impact_assessment' in rec_data:
+        st.markdown("**📊 영향 평가:**")
+        st.info(rec_data['impact_assessment'])
+    
+    # 해결 단계
+    if 'remediation_steps' in rec_data:
+        st.markdown("**🛠️ AI 권장 해결 단계:**")
+        for i, step in enumerate(rec_data['remediation_steps'], 1):
+            st.write(f"{i}. {step}")
+    
+    # 모범 사례
+    if 'best_practices' in rec_data:
+        st.markdown("**✅ 모범 사례:**")
+        for practice in rec_data['best_practices']:
+            st.write(f"• {practice}")
+    
+    # 관련 서비스
+    if 'related_services' in rec_data:
+        st.markdown("**🔗 관련 AWS 서비스:**")
+        services_text = ", ".join(rec_data['related_services'])
+        st.write(services_text)
+    
+    # 우선순위 및 예상 시간
+    col1, col2 = st.columns(2)
+    with col1:
+        priority = rec_data.get('priority_level', 'MEDIUM')
+        priority_color = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(priority, "🟡")
+        st.markdown(f"**우선순위:** {priority_color} {priority}")
+    
+    with col2:
+        effort = rec_data.get('estimated_effort', 'N/A')
+        st.markdown(f"**예상 소요 시간:** {effort}")
+
+def show_service_ai_advice(service, advice):
+    """서비스별 AI 조언 표시"""
+    
+    # 서비스 개요
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("발견된 이슈", advice.get('issue_count', 0))
+    
+    with col2:
+        severity = advice.get('severity_breakdown', {})
+        high_count = severity.get('high', 0)
+        if high_count > 0:
+            st.metric("높은 위험 이슈", high_count, delta=f"-{high_count}", delta_color="inverse")
+        else:
+            st.metric("높은 위험 이슈", 0, delta="양호", delta_color="normal")
+    
+    # 주요 집중 영역
+    if 'focus_areas' in advice:
+        st.markdown("**🎯 주요 집중 영역:**")
+        for area in advice['focus_areas']:
+            st.write(f"• {area}")
+    
+    # 모범 사례
+    if 'best_practices' in advice:
+        st.markdown("**✅ 권장 모범 사례:**")
+        for practice in advice['best_practices']:
+            st.write(f"• {practice}")
+    
+    # 자동화 도구
+    if 'automation_tools' in advice:
+        st.markdown("**⚙️ 권장 자동화 도구:**")
+        for tool in advice['automation_tools']:
+            st.write(f"• {tool}")
+    
+    # 우선순위 조치
+    if 'priority_actions' in advice:
+        st.markdown("**🚀 우선순위 조치:**")
+        for i, action in enumerate(advice['priority_actions'][:3], 1):
+            st.write(f"{i}. {action}")
+
+def show_compliance_guidance_ui(compliance):
+    """규정 준수 가이드 UI 표시"""
+    
+    if not compliance:
+        st.info("규정 준수 가이드가 없습니다.")
+        return
+    
+    # 영향받는 표준
+    standards = compliance.get('affected_standards', [])
+    if standards:
+        st.markdown("**📋 영향받는 규정:**")
+        for standard in standards:
+            st.write(f"• {standard}")
+    
+    # 위험 수준
+    risk_level = compliance.get('compliance_risk_level', 'MEDIUM')
+    risk_color = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(risk_level, "🟡")
+    st.markdown(f"**위험 수준:** {risk_color} {risk_level}")
+    
+    # 권장사항
+    recommendations = compliance.get('recommendations', [])
+    if recommendations:
+        st.markdown("**📝 권장사항:**")
+        for rec in recommendations:
+            st.write(f"• {rec}")
+
+def show_automation_suggestions_ui(automation):
+    """자동화 제안 UI 표시"""
+    
+    if not automation:
+        st.info("자동화 제안이 없습니다.")
+        return
+    
+    # 자동화 기회
+    opportunities = automation.get('opportunities', [])
+    if opportunities:
+        st.markdown("**🤖 자동화 기회:**")
+        for opp in opportunities:
+            with st.expander(f"🔧 {opp.get('tool', 'Unknown Tool')}"):
+                st.write(f"**설명:** {opp.get('description', 'N/A')}")
+                st.write(f"**구현 방법:** {opp.get('implementation', 'N/A')}")
+    
+    # 우선순위 및 예상 노력
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        priority = automation.get('priority_level', 'MEDIUM')
+        priority_color = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(priority, "🟡")
+        st.markdown(f"**우선순위:** {priority_color} {priority}")
+    
+    with col2:
+        effort = automation.get('estimated_effort', 'N/A')
+        st.markdown(f"**예상 노력:** {effort}")
 
 if __name__ == "__main__":
     main()
