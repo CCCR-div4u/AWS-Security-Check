@@ -5343,8 +5343,7 @@ def show_automation_suggestions_ui(automation):
 
 if __name__ == "__main__":
     main()
-# 
-============================================================================
+# ============================================================================
 # Claude Bedrock 보안 분석 통합
 # ============================================================================
 
@@ -5616,8 +5615,8 @@ def add_claude_analysis_to_dashboard():
     # Claude 분석 결과 표시
     if 'claude_analysis' in st.session_state:
         show_claude_analysis_ui(st.session_state.claude_analysis)
-def
- show_dashboard():
+
+def show_dashboard():
     """보안 스캔 완료 후 대시보드 표시"""
     
     st.subheader("📊 AWS 보안 대시보드")
@@ -5744,8 +5743,9 @@ def
                 del st.session_state.aws_session
             if 'account_info' in st.session_state:
                 del st.session_state.account_info
-            st.rerun()# ===
-=========================================================================
+            st.rerun()
+
+# ============================================================================
 # AWS 보안 스캔 함수들
 # ============================================================================
 
