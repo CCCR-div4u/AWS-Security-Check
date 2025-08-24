@@ -1421,8 +1421,8 @@ JSON 형태로 다음 구조를 따라 응답해주세요:
 def invoke_bedrock_model(bedrock_client, prompt):
     """Bedrock Claude 3 모델 호출"""
     try:
-        # Claude 3 Sonnet 모델 사용
-        model_id = "anthropic.claude-3-sonnet-20240229-v1:0"
+        # Claude 3 Sonnet 모델 사용 (inference profile)
+        model_id = "us.anthropic.claude-3-sonnet-20240229-v1:0"
         
         # 요청 본문 구성
         request_body = {
