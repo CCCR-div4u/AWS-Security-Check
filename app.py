@@ -1421,8 +1421,8 @@ JSON 형태로 다음 구조를 따라 응답해주세요:
 def invoke_bedrock_model(bedrock_client, prompt):
     """Bedrock Claude 3 모델 호출"""
     try:
-        # Claude 3 Sonnet 모델 사용 (inference profile)
-        model_id = "us.anthropic.claude-3-sonnet-20240229-v1:0"
+        # Claude 3 Sonnet Inference Profile 사용 (승인받은 모델)
+        model_id = "apac.anthropic.claude-3-sonnet-20240229-v1:0"
         
         # 요청 본문 구성
         request_body = {
@@ -5343,3 +5343,877 @@ def show_automation_suggestions_ui(automation):
 
 if __name__ == "__main__":
     main()
+# 
+============================================================================
+# Claude Bedrock 보안 분석 통합
+# ============================================================================
+
+def analyze_security_with_claude(scan_results, aws_session):
+    """Claude 3 Sonnet을 사용한 고급 보안 분석"""
+    
+    try:
+        # Bedrock 클라이언트 생성
+        bedrock_client = aws_session.client('bedrock-runtime', region_name='ap-northeast-2')
+        
+        # Claude 3 Sonnet Inference Profile 사용
+        model_id = "apac.anthropic.claude-3-sonnet-20240229-v1:0"
+        
+        # 스캔 결과를 Claude 분석용 텍스트로 변환
+        analysis_prompt = create_security_analysis_prompt(scan_results)
+        
+        # Claude API 호출
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 4000,
+            "temperature": 0.1,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": analysis_prompt
+                }
+            ]
+        }
+        
+        response = bedrock_client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(request_body),
+            contentType='application/json'
+        )
+        
+        # 응답 파싱
+        response_body = json.loads(response['body'].read())
+        claude_analysis = response_body['content'][0]['text']
+        
+        # 분석 결과 파싱 및 구조화
+        structured_analysis = parse_claude_analysis(claude_analysis)
+        
+        return {
+            'status': 'success',
+            'analysis': structured_analysis,
+            'raw_response': claude_analysis
+        }
+        
+    except Exception as e:
+        return {
+            'status': 'error',
+            'error': str(e),
+            'analysis': None
+        }
+
+def create_security_analysis_prompt(scan_results):
+    """Claude 분석을 위한 프롬프트 생성"""
+    
+    # 스캔 결과 요약
+    summary = scan_results.get('summary', {})
+    total_issues = summary.get('total_issues', 0)
+    high_risk = summary.get('high_risk', 0)
+    medium_risk = summary.get('medium_risk', 0)
+    low_risk = summary.get('low_risk', 0)
+    
+    # 서비스별 이슈 수집
+    service_issues = []
+    for service in ['iam', 'cloudtrail', 's3', 'guardduty', 'waf']:
+        if service in scan_results and scan_results[service].get('status') == 'completed':
+            issues = scan_results[service].get('issues', [])
+            if issues:
+                service_issues.append(f"\n{service.upper()} 서비스 이슈 ({len(issues)}개):")
+                for issue in issues[:5]:  # 상위 5개만
+                    service_issues.append(f"- {issue.get('title', 'Unknown')}: {issue.get('description', 'No description')}")
+    
+    prompt = f"""
+당신은 AWS 보안 전문가입니다. 다음 AWS 계정의 보안 스캔 결과를 분석하고 전문적인 보안 권장사항을 제공해주세요.
+
+## 스캔 결과 요약
+- 총 이슈 수: {total_issues}개
+- 고위험: {high_risk}개
+- 중위험: {medium_risk}개  
+- 저위험: {low_risk}개
+
+## 발견된 보안 이슈
+{''.join(service_issues)}
+
+## 분석 요청사항
+다음 형식으로 분석 결과를 제공해주세요:
+
+### 1. 전체 보안 상태 평가
+- 보안 점수 (1-100점)
+- 전반적인 보안 수준 평가
+
+### 2. 주요 위험 요소 (상위 3개)
+- 각 위험 요소별 상세 설명
+- 비즈니스 영향도
+- 공격자 악용 가능성
+
+### 3. 우선순위 개선 권장사항 (상위 5개)
+- 구체적인 해결 방법
+- 구현 난이도
+- 예상 효과
+
+### 4. 규정 준수 관점
+- 주요 보안 표준 (ISO 27001, SOC 2, PCI DSS) 관점에서 평가
+- 미준수 항목 및 개선 방안
+
+### 5. 장기 보안 전략
+- 6개월 내 개선 계획
+- 보안 모니터링 강화 방안
+
+한국어로 답변하고, 실무진이 바로 적용할 수 있는 구체적이고 실용적인 조언을 제공해주세요.
+"""
+    
+    return prompt
+
+def parse_claude_analysis(claude_response):
+    """Claude 응답을 구조화된 데이터로 파싱"""
+    
+    try:
+        # 기본 구조 생성
+        analysis = {
+            'security_score': 0,
+            'overall_assessment': '',
+            'major_risks': [],
+            'priority_recommendations': [],
+            'compliance_status': {},
+            'long_term_strategy': '',
+            'raw_analysis': claude_response
+        }
+        
+        # 간단한 파싱 (실제로는 더 정교한 파싱 필요)
+        lines = claude_response.split('\n')
+        current_section = None
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # 섹션 헤더 감지
+            if '보안 점수' in line or '점수' in line:
+                # 점수 추출 시도
+                import re
+                score_match = re.search(r'(\d+)', line)
+                if score_match:
+                    analysis['security_score'] = int(score_match.group(1))
+            
+            elif '전반적인' in line or '전체' in line:
+                current_section = 'overall'
+            elif '주요 위험' in line or '위험 요소' in line:
+                current_section = 'risks'
+            elif '권장사항' in line or '개선' in line:
+                current_section = 'recommendations'
+            elif '규정 준수' in line or '컴플라이언스' in line:
+                current_section = 'compliance'
+            elif '장기' in line or '전략' in line:
+                current_section = 'strategy'
+            
+            # 내용 수집
+            elif line.startswith('-') or line.startswith('•'):
+                content = line[1:].strip()
+                if current_section == 'risks' and len(analysis['major_risks']) < 5:
+                    analysis['major_risks'].append(content)
+                elif current_section == 'recommendations' and len(analysis['priority_recommendations']) < 5:
+                    analysis['priority_recommendations'].append(content)
+        
+        # 기본값 설정
+        if not analysis['major_risks']:
+            analysis['major_risks'] = ['상세 분석이 필요합니다.']
+        if not analysis['priority_recommendations']:
+            analysis['priority_recommendations'] = ['추가 검토가 필요합니다.']
+            
+        return analysis
+        
+    except Exception as e:
+        return {
+            'security_score': 50,
+            'overall_assessment': 'Claude 분석 파싱 중 오류가 발생했습니다.',
+            'major_risks': [f'파싱 오류: {str(e)}'],
+            'priority_recommendations': ['Claude 응답을 수동으로 확인해주세요.'],
+            'compliance_status': {},
+            'long_term_strategy': '수동 검토 필요',
+            'raw_analysis': claude_response
+        }
+
+def show_claude_analysis_ui(claude_result):
+    """Claude 분석 결과 UI 표시"""
+    
+    if not claude_result or claude_result.get('status') != 'success':
+        st.error("❌ Claude 보안 분석을 사용할 수 없습니다.")
+        if claude_result and claude_result.get('error'):
+            st.error(f"오류: {claude_result['error']}")
+        return
+    
+    analysis = claude_result.get('analysis', {})
+    
+    st.markdown("### 🤖 Claude 3 Sonnet 고급 보안 분석")
+    
+    # 보안 점수 표시
+    security_score = analysis.get('security_score', 0)
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        # 점수에 따른 색상 결정
+        if security_score >= 80:
+            score_color = "🟢"
+            score_status = "양호"
+        elif security_score >= 60:
+            score_color = "🟡"
+            score_status = "보통"
+        else:
+            score_color = "🔴"
+            score_status = "위험"
+        
+        st.metric(
+            label="🎯 보안 점수",
+            value=f"{security_score}/100",
+            delta=f"{score_status} {score_color}"
+        )
+    
+    # 주요 위험 요소
+    st.markdown("#### 🚨 주요 위험 요소")
+    major_risks = analysis.get('major_risks', [])
+    
+    for i, risk in enumerate(major_risks[:3], 1):
+        with st.expander(f"위험 {i}: {risk[:50]}..."):
+            st.write(risk)
+    
+    # 우선순위 권장사항
+    st.markdown("#### 📋 우선순위 개선 권장사항")
+    recommendations = analysis.get('priority_recommendations', [])
+    
+    for i, rec in enumerate(recommendations[:5], 1):
+        st.write(f"**{i}.** {rec}")
+    
+    # 전체 분석 결과 (접을 수 있는 형태)
+    with st.expander("📄 Claude 전체 분석 결과 보기"):
+        raw_analysis = analysis.get('raw_analysis', '분석 결과가 없습니다.')
+        st.text_area(
+            "Claude 3 Sonnet 분석 결과",
+            value=raw_analysis,
+            height=400,
+            disabled=True
+        )
+
+# 기존 show_dashboard 함수에 Claude 분석 추가
+def add_claude_analysis_to_dashboard():
+    """대시보드에 Claude 분석 섹션 추가"""
+    
+    if 'scan_results' not in st.session_state:
+        return
+    
+    st.markdown("---")
+    
+    # Claude 분석 실행 버튼
+    col1, col2, col3 = st.columns([1, 2, 1])
+    
+    with col2:
+        if st.button("🤖 Claude 3 Sonnet 고급 분석 실행", type="primary", use_container_width=True):
+            with st.spinner("🔄 Claude 3 Sonnet이 보안 데이터를 분석하고 있습니다..."):
+                claude_result = analyze_security_with_claude(
+                    st.session_state.scan_results,
+                    st.session_state.aws_session
+                )
+                st.session_state.claude_analysis = claude_result
+    
+    # Claude 분석 결과 표시
+    if 'claude_analysis' in st.session_state:
+        show_claude_analysis_ui(st.session_state.claude_analysis)
+def
+ show_dashboard():
+    """보안 스캔 완료 후 대시보드 표시"""
+    
+    st.subheader("📊 AWS 보안 대시보드")
+    
+    # 계정 정보 표시
+    if 'account_info' in st.session_state:
+        account_info = st.session_state.account_info
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("계정 ID", account_info['account_id'])
+        with col2:
+            st.metric("리전", account_info['region'])
+        with col3:
+            connection_type = "인스턴스 프로파일" if account_info['use_instance_profile'] else "수동 입력"
+            st.metric("연결 방식", connection_type)
+        with col4:
+            if 'scan_end_time' in st.session_state:
+                scan_duration = (st.session_state.scan_end_time - st.session_state.scan_start_time).total_seconds()
+                st.metric("스캔 시간", f"{scan_duration:.1f}초")
+    
+    st.markdown("---")
+    
+    # 스캔 결과 요약
+    if 'scan_results' in st.session_state:
+        scan_results = st.session_state.scan_results
+        summary = scan_results.get('summary', {})
+        
+        # 전체 요약 메트릭
+        st.markdown("### 📈 보안 스캔 요약")
+        
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            total_issues = summary.get('total_issues', 0)
+            st.metric("총 이슈", total_issues)
+        
+        with col2:
+            high_risk = summary.get('high_risk', 0)
+            st.metric("고위험", high_risk, delta="🔴" if high_risk > 0 else "✅")
+        
+        with col3:
+            medium_risk = summary.get('medium_risk', 0)
+            st.metric("중위험", medium_risk, delta="🟡" if medium_risk > 0 else "✅")
+        
+        with col4:
+            low_risk = summary.get('low_risk', 0)
+            st.metric("저위험", low_risk, delta="🟢" if low_risk > 0 else "✅")
+        
+        with col5:
+            security_score = summary.get('security_score', 0)
+            if security_score >= 80:
+                score_delta = "🟢 양호"
+            elif security_score >= 60:
+                score_delta = "🟡 보통"
+            else:
+                score_delta = "🔴 위험"
+            st.metric("보안 점수", f"{security_score}/100", delta=score_delta)
+        
+        st.markdown("---")
+        
+        # 서비스별 스캔 결과
+        st.markdown("### 🔍 서비스별 스캔 결과")
+        
+        services = ['iam', 'cloudtrail', 's3', 'guardduty', 'waf']
+        service_names = {
+            'iam': '🔐 IAM',
+            'cloudtrail': '📋 CloudTrail', 
+            's3': '🗄️ S3',
+            'guardduty': '🛡️ GuardDuty',
+            'waf': '🌐 WAF'
+        }
+        
+        for service in services:
+            if service in scan_results:
+                result = scan_results[service]
+                status = result.get('status', 'unknown')
+                issues = result.get('issues', [])
+                
+                with st.expander(f"{service_names.get(service, service.upper())} - {len(issues)}개 이슈"):
+                    if status == 'completed':
+                        if issues:
+                            for issue in issues[:5]:  # 상위 5개만 표시
+                                risk_level = issue.get('risk_level', 'low')
+                                risk_icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(risk_level, "🟢")
+                                st.write(f"{risk_icon} **{issue.get('title', 'Unknown Issue')}**")
+                                st.write(f"   {issue.get('description', 'No description available')}")
+                        else:
+                            st.success("✅ 이슈가 발견되지 않았습니다.")
+                    elif status == 'failed':
+                        error_msg = result.get('error', 'Unknown error')
+                        st.error(f"❌ 스캔 실패: {error_msg}")
+                    else:
+                        st.info("ℹ️ 스캔이 완료되지 않았습니다.")
+    
+    # Claude 분석 섹션 추가
+    add_claude_analysis_to_dashboard()
+    
+    st.markdown("---")
+    
+    # 액션 버튼들
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔄 새로운 스캔 시작", use_container_width=True):
+            # 스캔 상태 초기화
+            st.session_state.scan_completed = False
+            if 'scan_results' in st.session_state:
+                del st.session_state.scan_results
+            if 'claude_analysis' in st.session_state:
+                del st.session_state.claude_analysis
+            st.rerun()
+    
+    with col2:
+        if st.button("📊 상세 보고서 생성", use_container_width=True):
+            st.info("상세 보고서 기능은 개발 중입니다.")
+    
+    with col3:
+        if st.button("🔐 다른 계정 연결", use_container_width=True):
+            # 인증 상태 초기화
+            st.session_state.authenticated = False
+            st.session_state.scan_completed = False
+            if 'aws_session' in st.session_state:
+                del st.session_state.aws_session
+            if 'account_info' in st.session_state:
+                del st.session_state.account_info
+            st.rerun()# ===
+=========================================================================
+# AWS 보안 스캔 함수들
+# ============================================================================
+
+def perform_iam_scan(aws_session, deep_scan=False):
+    """IAM 보안 스캔 수행"""
+    
+    try:
+        iam_client = aws_session.client('iam')
+        issues = []
+        data = {}
+        
+        # 사용자 목록 조회
+        try:
+            users_response = iam_client.list_users()
+            users = users_response.get('Users', [])
+            data['users_count'] = len(users)
+            
+            # 루트 계정 사용 확인
+            for user in users:
+                if user['UserName'] == 'root':
+                    issues.append({
+                        'type': 'root_user_found',
+                        'title': '루트 계정 발견',
+                        'description': '루트 계정이 활성화되어 있습니다. 보안상 위험할 수 있습니다.',
+                        'risk_level': 'high',
+                        'resource': user['UserName']
+                    })
+            
+            # MFA 미설정 사용자 확인
+            for user in users[:10]:  # 처음 10명만 확인
+                try:
+                    mfa_devices = iam_client.list_mfa_devices(UserName=user['UserName'])
+                    if not mfa_devices.get('MFADevices'):
+                        issues.append({
+                            'type': 'no_mfa',
+                            'title': f'MFA 미설정: {user["UserName"]}',
+                            'description': f'사용자 {user["UserName"]}에 MFA가 설정되지 않았습니다.',
+                            'risk_level': 'medium',
+                            'resource': user['UserName']
+                        })
+                except ClientError:
+                    pass  # 권한 부족 시 무시
+                    
+        except ClientError as e:
+            issues.append({
+                'type': 'iam_access_denied',
+                'title': 'IAM 접근 권한 부족',
+                'description': f'IAM 리소스에 접근할 권한이 없습니다: {e.response["Error"]["Code"]}',
+                'risk_level': 'low',
+                'resource': 'IAM'
+            })
+        
+        return {
+            'data': data,
+            'issues': issues
+        }
+        
+    except Exception as e:
+        return {
+            'data': {},
+            'issues': [{
+                'type': 'iam_scan_error',
+                'title': 'IAM 스캔 오류',
+                'description': f'IAM 스캔 중 오류가 발생했습니다: {str(e)}',
+                'risk_level': 'medium',
+                'resource': 'IAM'
+            }]
+        }
+
+def perform_cloudtrail_scan(aws_session, deep_scan=False):
+    """CloudTrail 보안 스캔 수행"""
+    
+    try:
+        cloudtrail_client = aws_session.client('cloudtrail')
+        issues = []
+        data = {}
+        
+        # CloudTrail 설정 확인
+        try:
+            trails_response = cloudtrail_client.describe_trails()
+            trails = trails_response.get('trailList', [])
+            data['trails_count'] = len(trails)
+            
+            if not trails:
+                issues.append({
+                    'type': 'no_cloudtrail',
+                    'title': 'CloudTrail 미설정',
+                    'description': 'CloudTrail이 설정되지 않아 API 호출 로깅이 되지 않습니다.',
+                    'risk_level': 'high',
+                    'resource': 'CloudTrail'
+                })
+            else:
+                # 각 Trail 상태 확인
+                for trail in trails:
+                    trail_name = trail.get('Name', 'Unknown')
+                    try:
+                        status = cloudtrail_client.get_trail_status(Name=trail_name)
+                        if not status.get('IsLogging', False):
+                            issues.append({
+                                'type': 'trail_not_logging',
+                                'title': f'CloudTrail 로깅 중단: {trail_name}',
+                                'description': f'Trail {trail_name}이 로깅을 중단했습니다.',
+                                'risk_level': 'medium',
+                                'resource': trail_name
+                            })
+                    except ClientError:
+                        pass
+                        
+        except ClientError as e:
+            issues.append({
+                'type': 'cloudtrail_access_denied',
+                'title': 'CloudTrail 접근 권한 부족',
+                'description': f'CloudTrail에 접근할 권한이 없습니다: {e.response["Error"]["Code"]}',
+                'risk_level': 'low',
+                'resource': 'CloudTrail'
+            })
+        
+        return {
+            'data': data,
+            'issues': issues
+        }
+        
+    except Exception as e:
+        return {
+            'data': {},
+            'issues': [{
+                'type': 'cloudtrail_scan_error',
+                'title': 'CloudTrail 스캔 오류',
+                'description': f'CloudTrail 스캔 중 오류가 발생했습니다: {str(e)}',
+                'risk_level': 'medium',
+                'resource': 'CloudTrail'
+            }]
+        }
+
+def perform_s3_scan(aws_session, deep_scan=False):
+    """S3 보안 스캔 수행"""
+    
+    try:
+        s3_client = aws_session.client('s3')
+        issues = []
+        data = {}
+        
+        # S3 버킷 목록 조회
+        try:
+            buckets_response = s3_client.list_buckets()
+            buckets = buckets_response.get('Buckets', [])
+            data['buckets_count'] = len(buckets)
+            
+            # 각 버킷의 공개 설정 확인 (처음 10개만)
+            for bucket in buckets[:10]:
+                bucket_name = bucket['Name']
+                
+                try:
+                    # 버킷 ACL 확인
+                    acl = s3_client.get_bucket_acl(Bucket=bucket_name)
+                    for grant in acl.get('Grants', []):
+                        grantee = grant.get('Grantee', {})
+                        if grantee.get('URI') == 'http://acs.amazonaws.com/groups/global/AllUsers':
+                            issues.append({
+                                'type': 'public_bucket',
+                                'title': f'공개 S3 버킷: {bucket_name}',
+                                'description': f'S3 버킷 {bucket_name}이 모든 사용자에게 공개되어 있습니다.',
+                                'risk_level': 'high',
+                                'resource': bucket_name
+                            })
+                            
+                except ClientError:
+                    pass  # 권한 부족 시 무시
+                    
+        except ClientError as e:
+            issues.append({
+                'type': 's3_access_denied',
+                'title': 'S3 접근 권한 부족',
+                'description': f'S3에 접근할 권한이 없습니다: {e.response["Error"]["Code"]}',
+                'risk_level': 'low',
+                'resource': 'S3'
+            })
+        
+        return {
+            'data': data,
+            'issues': issues
+        }
+        
+    except Exception as e:
+        return {
+            'data': {},
+            'issues': [{
+                'type': 's3_scan_error',
+                'title': 'S3 스캔 오류',
+                'description': f'S3 스캔 중 오류가 발생했습니다: {str(e)}',
+                'risk_level': 'medium',
+                'resource': 'S3'
+            }]
+        }
+
+def perform_guardduty_scan(aws_session, deep_scan=False):
+    """GuardDuty 보안 스캔 수행"""
+    
+    try:
+        guardduty_client = aws_session.client('guardduty')
+        issues = []
+        data = {}
+        
+        # GuardDuty 탐지기 확인
+        try:
+            detectors_response = guardduty_client.list_detectors()
+            detectors = detectors_response.get('DetectorIds', [])
+            data['detectors_count'] = len(detectors)
+            
+            if not detectors:
+                issues.append({
+                    'type': 'guardduty_not_enabled',
+                    'title': 'GuardDuty 미활성화',
+                    'description': 'GuardDuty가 활성화되지 않아 위협 탐지가 되지 않습니다.',
+                    'risk_level': 'medium',
+                    'resource': 'GuardDuty'
+                })
+            else:
+                # 발견사항 확인 (최근 것만)
+                for detector_id in detectors[:1]:  # 첫 번째 탐지기만
+                    try:
+                        findings_response = guardduty_client.list_findings(
+                            DetectorId=detector_id,
+                            MaxResults=10
+                        )
+                        findings = findings_response.get('FindingIds', [])
+                        data['recent_findings'] = len(findings)
+                        
+                        if findings:
+                            issues.append({
+                                'type': 'guardduty_findings',
+                                'title': f'GuardDuty 위협 탐지: {len(findings)}건',
+                                'description': f'GuardDuty가 {len(findings)}건의 보안 위협을 탐지했습니다.',
+                                'risk_level': 'high',
+                                'resource': detector_id
+                            })
+                    except ClientError:
+                        pass
+                        
+        except ClientError as e:
+            issues.append({
+                'type': 'guardduty_access_denied',
+                'title': 'GuardDuty 접근 권한 부족',
+                'description': f'GuardDuty에 접근할 권한이 없습니다: {e.response["Error"]["Code"]}',
+                'risk_level': 'low',
+                'resource': 'GuardDuty'
+            })
+        
+        return {
+            'data': data,
+            'issues': issues
+        }
+        
+    except Exception as e:
+        return {
+            'data': {},
+            'issues': [{
+                'type': 'guardduty_scan_error',
+                'title': 'GuardDuty 스캔 오류',
+                'description': f'GuardDuty 스캔 중 오류가 발생했습니다: {str(e)}',
+                'risk_level': 'medium',
+                'resource': 'GuardDuty'
+            }]
+        }
+
+def perform_waf_scan(aws_session, deep_scan=False):
+    """WAF 보안 스캔 수행"""
+    
+    try:
+        wafv2_client = aws_session.client('wafv2')
+        issues = []
+        data = {}
+        
+        # WAF WebACL 확인
+        try:
+            # Regional WebACLs
+            regional_response = wafv2_client.list_web_acls(Scope='REGIONAL')
+            regional_acls = regional_response.get('WebACLs', [])
+            
+            # CloudFront WebACLs (us-east-1에서만 가능)
+            cloudfront_acls = []
+            try:
+                if aws_session.region_name == 'us-east-1':
+                    cloudfront_response = wafv2_client.list_web_acls(Scope='CLOUDFRONT')
+                    cloudfront_acls = cloudfront_response.get('WebACLs', [])
+            except ClientError:
+                pass
+            
+            total_acls = len(regional_acls) + len(cloudfront_acls)
+            data['webacls_count'] = total_acls
+            
+            if total_acls == 0:
+                issues.append({
+                    'type': 'no_waf',
+                    'title': 'WAF 미설정',
+                    'description': 'WAF가 설정되지 않아 웹 애플리케이션 보호가 되지 않습니다.',
+                    'risk_level': 'medium',
+                    'resource': 'WAF'
+                })
+                
+        except ClientError as e:
+            issues.append({
+                'type': 'waf_access_denied',
+                'title': 'WAF 접근 권한 부족',
+                'description': f'WAF에 접근할 권한이 없습니다: {e.response["Error"]["Code"]}',
+                'risk_level': 'low',
+                'resource': 'WAF'
+            })
+        
+        return {
+            'data': data,
+            'issues': issues
+        }
+        
+    except Exception as e:
+        return {
+            'data': {},
+            'issues': [{
+                'type': 'waf_scan_error',
+                'title': 'WAF 스캔 오류',
+                'description': f'WAF 스캔 중 오류가 발생했습니다: {str(e)}',
+                'risk_level': 'medium',
+                'resource': 'WAF'
+            }]
+        }
+
+def calculate_security_score(high_risk, medium_risk, low_risk, scan_results):
+    """보안 점수 계산"""
+    
+    # 기본 점수 100점에서 시작
+    base_score = 100
+    
+    # 위험도별 감점
+    high_penalty = high_risk * 15    # 고위험: 15점씩 감점
+    medium_penalty = medium_risk * 8  # 중위험: 8점씩 감점
+    low_penalty = low_risk * 3       # 저위험: 3점씩 감점
+    
+    # 서비스 실패 감점
+    failed_services = len([s for s in scan_results.keys() 
+                          if s != 'summary' and scan_results[s].get('status') == 'failed'])
+    service_penalty = failed_services * 10
+    
+    # 최종 점수 계산
+    final_score = base_score - high_penalty - medium_penalty - low_penalty - service_penalty
+    
+    # 0점 이하로 내려가지 않도록
+    return max(0, min(100, final_score))
+
+def categorize_security_issue(issue, service):
+    """보안 이슈를 카테고리별로 분류"""
+    
+    issue_type = issue.get('type', '')
+    
+    if 'mfa' in issue_type or 'root' in issue_type or 'access' in issue_type:
+        return 'access_control'
+    elif 'public' in issue_type or 'encryption' in issue_type:
+        return 'data_protection'
+    elif 'cloudtrail' in issue_type or 'logging' in issue_type:
+        return 'monitoring'
+    elif 'waf' in issue_type or 'network' in issue_type:
+        return 'network_security'
+    elif 'guardduty' in issue_type or 'threat' in issue_type:
+        return 'threat_detection'
+    else:
+        return 'compliance'
+
+def get_priority_issues(scan_results):
+    """우선순위 이슈 선별"""
+    
+    all_issues = []
+    
+    for service, result in scan_results.items():
+        if service == 'summary':
+            continue
+            
+        issues = result.get('issues', [])
+        for issue in issues:
+            issue['service'] = service
+            all_issues.append(issue)
+    
+    # 위험도별 정렬 (high > medium > low)
+    risk_priority = {'high': 3, 'medium': 2, 'low': 1}
+    all_issues.sort(key=lambda x: risk_priority.get(x.get('risk_level', 'low'), 1), reverse=True)
+    
+    return all_issues[:10]  # 상위 10개
+
+def evaluate_service_health(scan_results):
+    """서비스별 보안 상태 평가"""
+    
+    service_health = {}
+    
+    for service in ['iam', 'cloudtrail', 's3', 'guardduty', 'waf']:
+        if service in scan_results:
+            result = scan_results[service]
+            status = result.get('status', 'unknown')
+            issues = result.get('issues', [])
+            
+            if status == 'failed':
+                health = 'error'
+            elif not issues:
+                health = 'excellent'
+            else:
+                high_issues = len([i for i in issues if i.get('risk_level') == 'high'])
+                if high_issues > 0:
+                    health = 'poor'
+                elif len(issues) > 5:
+                    health = 'fair'
+                else:
+                    health = 'good'
+            
+            service_health[service] = health
+    
+    return service_health
+
+def evaluate_compliance_status(scan_results):
+    """규정 준수 상태 평가"""
+    
+    compliance = {
+        'iso27001': 'unknown',
+        'soc2': 'unknown', 
+        'pci_dss': 'unknown',
+        'overall': 'unknown'
+    }
+    
+    # 간단한 규정 준수 평가 로직
+    total_high_issues = 0
+    for service, result in scan_results.items():
+        if service != 'summary':
+            issues = result.get('issues', [])
+            total_high_issues += len([i for i in issues if i.get('risk_level') == 'high'])
+    
+    if total_high_issues == 0:
+        compliance['overall'] = 'compliant'
+    elif total_high_issues <= 3:
+        compliance['overall'] = 'partially_compliant'
+    else:
+        compliance['overall'] = 'non_compliant'
+    
+    return compliance
+
+def generate_integrated_recommendations(scan_results, integrated_analysis):
+    """통합 권장사항 생성"""
+    
+    recommendations = []
+    
+    # 고위험 이슈 기반 권장사항
+    priority_issues = get_priority_issues(scan_results)
+    
+    for issue in priority_issues[:3]:
+        issue_type = issue.get('type', '')
+        
+        if 'root' in issue_type:
+            recommendations.append("루트 계정 사용을 중단하고 IAM 사용자를 생성하세요.")
+        elif 'mfa' in issue_type:
+            recommendations.append("모든 IAM 사용자에 대해 MFA를 활성화하세요.")
+        elif 'public' in issue_type:
+            recommendations.append("공개된 S3 버킷의 접근 권한을 검토하고 제한하세요.")
+        elif 'cloudtrail' in issue_type:
+            recommendations.append("CloudTrail을 활성화하여 API 호출을 로깅하세요.")
+        elif 'guardduty' in issue_type:
+            recommendations.append("GuardDuty를 활성화하여 위협 탐지를 강화하세요.")
+    
+    # 기본 권장사항
+    if not recommendations:
+        recommendations = [
+            "정기적인 보안 스캔을 수행하세요.",
+            "최소 권한 원칙을 적용하세요.",
+            "보안 모니터링을 강화하세요."
+        ]
+    
+    return recommendations
