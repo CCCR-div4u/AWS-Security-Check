@@ -5438,12 +5438,12 @@ def create_security_analysis_prompt(scan_results):
 - 보안 점수 (1-100점)
 - 전반적인 보안 수준 평가
 
-### 2. 주요 위험 요소 (상위 3개)
+### 2. 주요 위험 요소
 - 각 위험 요소별 상세 설명
 - 비즈니스 영향도
 - 공격자 악용 가능성
 
-### 3. 우선순위 개선 권장사항 (상위 5개)
+### 3. 우선순위 개선 권장사항
 - 구체적인 해결 방법
 - 구현 난이도
 - 예상 효과
@@ -5507,9 +5507,9 @@ def parse_claude_analysis(claude_response):
             # 내용 수집
             elif line.startswith('-') or line.startswith('•'):
                 content = line[1:].strip()
-                if current_section == 'risks' and len(analysis['major_risks']) < 5:
+                if current_section == 'risks':
                     analysis['major_risks'].append(content)
-                elif current_section == 'recommendations' and len(analysis['priority_recommendations']) < 5:
+                elif current_section == 'recommendations':
                     analysis['priority_recommendations'].append(content)
         
         # 기본값 설정
@@ -5570,16 +5570,22 @@ def show_claude_analysis_ui(claude_result):
     st.markdown("#### 🚨 주요 위험 요소")
     major_risks = analysis.get('major_risks', [])
     
-    for i, risk in enumerate(major_risks[:3], 1):
-        with st.expander(f"위험 {i}: {risk[:50]}..."):
-            st.write(risk)
+    if major_risks:
+        for i, risk in enumerate(major_risks, 1):
+            with st.expander(f"위험 {i}: {risk[:50]}..."):
+                st.write(risk)
+    else:
+        st.info("식별된 주요 위험 요소가 없습니다.")
     
     # 우선순위 권장사항
     st.markdown("#### 📋 우선순위 개선 권장사항")
     recommendations = analysis.get('priority_recommendations', [])
     
-    for i, rec in enumerate(recommendations[:5], 1):
-        st.write(f"**{i}.** {rec}")
+    if recommendations:
+        for i, rec in enumerate(recommendations, 1):
+            st.write(f"**{i}.** {rec}")
+    else:
+        st.info("우선순위 권장사항이 없습니다.")
     
     # 전체 분석 결과 (접을 수 있는 형태)
     with st.expander("📄 Claude 전체 분석 결과 보기"):
