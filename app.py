@@ -1355,7 +1355,7 @@ def get_aws_documentation_links():
 def initialize_bedrock_client(aws_session):
     """Amazon Bedrock 클라이언트 초기화"""
     try:
-        bedrock_client = aws_session.client('bedrock-runtime', region_name='us-east-1')
+        bedrock_client = aws_session.client('bedrock-runtime', region_name='ap-northeast-2')
         # Bedrock 서비스 사용 가능 여부 테스트
         return bedrock_client
     except Exception as e:
