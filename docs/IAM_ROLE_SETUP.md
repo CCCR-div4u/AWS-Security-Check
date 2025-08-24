@@ -36,7 +36,7 @@ AWS 콘솔 → IAM → 정책 → 정책 생성
         "s3:GetBucketPublicAccessBlock",
         "s3:GetBucketLocation",
         "s3:GetBucketVersioning",
-        "s3:GetBucketEncryption",
+        "s3:GetEncryptionConfiguration",
         "cloudtrail:DescribeTrails",
         "cloudtrail:GetTrailStatus",
         "cloudtrail:LookupEvents",
